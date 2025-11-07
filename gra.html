@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bezpieczna szkoła Chomranice</title>
+  <style>
+    html,body{height:100%;margin:0;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#eaf4ff;color:#0b1020}
+    .wrap{display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px}
+    h1{margin:8px 0 0;font-weight:800;letter-spacing:.5px;text-align:center}
+    .subtitle{opacity:.85;margin:0 0 8px;text-align:center}
+    .hud{display:flex;gap:16px;flex-wrap:wrap;align-items:center;justify-content:center}
+    .badge{background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.08);padding:6px 10px;border-radius:999px;font-weight:600}
+    canvas{width:min(100%,960px);aspect-ratio:16/9;border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.2);background:#87c9ff}
+    .btns{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+    button{background:#4fd1c5;color:#042;border:0;border-radius:12px;padding:10px 14px;font-weight:800;cursor:pointer}
+    button.secondary{background:rgba(0,0,0,.06);color:#0b1020;border:1px solid rgba(0,0,0,.12)}
+    #mobileControls button {
+      font-size: 28px;
+      padding: 14px 20px;
+      border-radius: 12px;
+      border: none;
+      background: #4fd1c5;
+      color: #042;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Bezpieczna szkoła Chomranice 2025</h1>
+  <p class="subtitle">Zbieraj kamizelki, unikaj przeszkód i bij rekord! (Enter = Start, P = Pauza)</p>
+  <div class="hud">
+    <span class="badge"><strong>bezpieczna szkola chomranice</strong></span>
+    <span class="badge">Sterowanie: ⬅️ ➡️, ⬆️/Spacja = skok, Enter = start</span>
+  </div>
+  <canvas id="game" width="960" height="540"></canvas>
+  <div id="mobileControls" style="display:flex;justify-content:center;gap:12px;margin-top:10px;">
+    <button onclick="pressLeft()">⬅️</button>
+    <button onclick="pressRight()">➡️</button>
+    <button onclick="pressJump()">⬆️</button>
+    <button onclick="pressStartPause()">⏯️</button>
+  </div>
+  <div class="btns">
+    <button id="btnStart">▶️ Start</button>
+    <button class="secondary" id="btnPause">⏸️ Pauza</button>
+    <button class="secondary" id="btnReset">🔄 Reset</button>
+    <button class="secondary" id="btnSound">🔊 Dźwięk: włączony</button>
+    <button class="secondary" id="btnFS">⛶ Pełny ekran</button>
+  </div>
+</div>
+<script>
+(function(){
+  const canvas=document.getElementById('game');
+  const ctx=canvas.getContext('2d');
+  const W=canvas.width,H=canvas.height;
+
+  // Warstwy tła (płaski widok)
+  const SKY_H = H*0.35;
+  const GRASS_H = H*0.15;
+  const SIDEWALK_H = H*0.10;
+  const ROAD_H = H*0.40;
+  const ROAD_Y = SKY_H + GRASS_H + SIDEWALK_H;
+  const GROUND_Y = ROAD_Y + ROAD_H*0.25;
+
+  // dźwięk
+  const audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  let soundOn=true;
+  function beep(freq=440,dur=0.1,type='sine',vol=0.06){
+    if(!soundOn) return;
+    const o=audioCtx.createOscillator();
+    const g=audioCtx.createGain();
+    o.type=type;o.frequency.value=freq;g.gain.value=vol;
+    o.connect(g);g.connect(audioCtx.destination);
+    o.start();setTimeout(()=>o.stop(),dur*1000);
+  }
+
+  const state={
+    running:false,paused:false,gameOver:false,showStart:true,
+    score:0,best:Number(localStorage.getItem('bsc_best')||0),
+    lives:3,maxLives:5,level:1,speed:5,
+    levelMsg:'', levelMsgTimer:0
+  };
+
+  const player={x:140,y:0,w:44,h:60,vy:0,onGround:false,animStep:0};
+  player.y = GROUND_Y - player.h;
+
+  const world={offset:0,obstacles:[],items:[],signs:[]};
+  let spawnTimer=0;       // gwarantowany spawn przeszkód/bonusów
+  let floatTexts=[];      // pływające napisy
+  let heartTimer=0;       // osobny zegar na serduszka
+  let heartInterval=randInt(900,1200); // ~15–20s przy ~60 FPS
+
+  function addFloatText(txt,x,y,color){
+    floatTexts.push({txt:txt,x:x,y:y,color:color,timer:60});
+  }
+
+  function rectsCollide(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y}
+  function rnd(a,b){return Math.random()*(b-a)+a}
+  function randInt(a,b){return Math.floor(Math.random()*(b-a+1))+a}
+
+  // --- SPAWN ---
+  function spawnStuff(){
+    // regularny strumień przeszkód/kamizelki
+    spawnTimer++;
+    const interval = Math.max(35, 60 - (state.level-1)*5);
+    if(spawnTimer>=interval){
+      spawnTimer=0;
+      const roll=Math.random();
+      if(roll<0.2){
+        world.obstacles.push({type:'cone',x:W+40,y:GROUND_Y-32,w:26,h:32,scored:false});
+      } else if(roll<0.35){
+        world.obstacles.push({type:'hole',x:W+40,y:GROUND_Y-10,w:70+Math.floor(Math.random()*40),h:12,scored:false});
+      } else if(roll<0.55){
+        world.obstacles.push({type:'ball',x:W+40,y:GROUND_Y-20,w:24,h:24,phase:0,scored:false});
+      } else if(roll<0.7){
+        world.obstacles.push({type:'bike',x:W+40,y:GROUND_Y-20,h:20,w:70,scored:false});
+      } else if(roll<0.85){
+        world.obstacles.push({type:'fallen_sign',x:W+40,y:GROUND_Y-12,h:12,w:50,scored:false});
+      } else {
+        world.items.push({type:'vest',x:W+40,y:GROUND_Y-rnd(40,120),w:28,h:34});
+      }
+      if(Math.random()<0.25){
+        world.signs.push({type:'school_sign',x:W+40,y:SKY_H+GRASS_H-40,w:34,h:34});
+      }
+    }
+
+    // rzadkie serduszka (extra życie)
+    heartTimer++;
+    if(heartTimer>=heartInterval){
+      heartTimer=0; heartInterval=randInt(900,1200); // nowy cel
+      world.items.push({type:'heart',x:W+40,y:GROUND_Y-rnd(40,120),w:26,h:26});
+    }
+  }
+
+  // --- RYSOWANIE TŁA ---
+  function drawBackground(){
+    const skyGrad=ctx.createLinearGradient(0,0,0,SKY_H);
+    skyGrad.addColorStop(0,'#aee1ff'); skyGrad.addColorStop(1,'#87c9ff');
+    ctx.fillStyle=skyGrad; ctx.fillRect(0,0,W,SKY_H);
+    ctx.fillStyle='#7ec850'; ctx.fillRect(0,SKY_H,W,GRASS_H);
+    ctx.fillStyle='#c5c9d1'; ctx.fillRect(0,SKY_H+GRASS_H,W,SIDEWALK_H);
+    ctx.fillStyle='#b2b7c0';
+    const tileW=60; const off = world.offset%tileW;
+    for(let x=-off; x<W; x+=tileW){ ctx.fillRect(x, SKY_H+GRASS_H, 8, SIDEWALK_H); }
+    ctx.fillStyle='#2f3640'; ctx.fillRect(0,ROAD_Y, W, ROAD_H);
+    ctx.fillStyle='#ffffff';
+    const dashW=80, dashH=6, gap=60, roadCenterY=ROAD_Y + ROAD_H*0.5 - dashH/2;
+    const lineOff=(world.offset%(dashW+gap));
+    for(let x=-lineOff; x<W; x+=dashW+gap){ ctx.fillRect(x, roadCenterY, dashW, dashH); }
+  }
+
+  // --- ZNAK STOJĄCY ---
+  function drawSchoolSign(sign){
+    ctx.fillStyle='#8e8e8e'; ctx.fillRect(sign.x+sign.w/2-3, sign.y, 6, 40);
+    ctx.beginPath(); ctx.moveTo(sign.x, sign.y); ctx.lineTo(sign.x+sign.w, sign.y); ctx.lineTo(sign.x+sign.w/2, sign.y - sign.h); ctx.closePath();
+    ctx.fillStyle='#ffd34d'; ctx.fill(); ctx.strokeStyle='#e53935'; ctx.lineWidth=4; ctx.stroke();
+    ctx.fillStyle='#333'; ctx.fillRect(sign.x+sign.w/2-8, sign.y- sign.h+12, 5, 8);
+    ctx.fillRect(sign.x+sign.w/2+3, sign.y- sign.h+14, 5, 8);
+  }
+
+  // --- GRACZ: POLICJANT
+  function drawPlayer(){
+    const {x,y,w,h}=player;
+    // głowa
+    ctx.fillStyle='#ffe0bd'; ctx.beginPath(); ctx.arc(x+w/2, y-12, 12, 0, Math.PI*2); ctx.fill();
+    // czapka
+    ctx.fillStyle='#003366';
+    ctx.fillRect(x+w/2-16, y-26, 32, 8); // daszek
+    ctx.fillRect(x+w/2-12, y-38, 24, 12); // góra
+    // mundur (tułów)
+    ctx.fillStyle='#1e3a8a'; ctx.fillRect(x+4, y, w-8, h-10);
+    // pasek
+    ctx.fillStyle='#000'; ctx.fillRect(x+4, y+h-20, w-8, 6);
+    // ręce
+    ctx.fillStyle='#ffe0bd'; ctx.fillRect(x-6, y+10, 6, 22); // lewa
+    ctx.fillRect(x+w, y+10, 6, 22); // prawa
+    // lizak – animowany obrotem
+    const angle = Math.sin(player.animStep/15) * 0.45; // rad
+    ctx.save();
+    // ręka jako punkt obrotu
+    ctx.translate(x+w+6, y+12);
+    ctx.rotate(angle);
+    // patyk lizaka 
+    ctx.fillStyle='#ddd';
+    ctx.fillRect(-2, -28, 4, 28);
+    // tarcza na górze patyka
+    ctx.fillStyle='#fff';
+    ctx.beginPath();
+    ctx.arc(0, -34, 12, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle='#e53935';
+    ctx.beginPath();
+    ctx.arc(0, -34, 6, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+    // nogi
+    const step=Math.sin(player.animStep/6);
+    ctx.fillStyle='#1e3a8a';
+    ctx.fillRect(x+6, y+h-10, 8, 18+step*4);
+    ctx.fillRect(x+w-14, y+h-10, 8, 18-step*4);
+  }
+
+  // --- POSTAĆ NA EKRANIE STARTOWYM ---
+  function drawBigPoliceman(cx, cy, scale){
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(scale, scale);
+    // głowa
+    ctx.fillStyle='#ffe0bd';
+    ctx.beginPath(); ctx.arc(0, -40, 20, 0, Math.PI*2); ctx.fill();
+    // czapka
+    ctx.fillStyle='#003366';
+    ctx.fillRect(-20, -60, 40, 10);
+    ctx.fillRect(-15, -75, 30, 15);
+    // tułów (mundur)
+    ctx.fillStyle='#1e3a8a'; ctx.fillRect(-22, -20, 44, 60);
+    // pasek
+    ctx.fillStyle='#000'; ctx.fillRect(-22, 20, 44, 8);
+    // ręce
+    ctx.fillStyle='#ffe0bd'; ctx.fillRect(-28, -10, 6, 30); ctx.fillRect(22, -10, 6, 30);
+    // lizak
+    ctx.save();
+    ctx.translate(35, -5);
+    ctx.fillStyle='#ddd'; ctx.fillRect(-2, 10, 4, 30);
+    ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(0,0,16,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#e53935'; ctx.beginPath(); ctx.arc(0,0,8,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+    // nogi
+    ctx.fillStyle='#1e3a8a'; ctx.fillRect(-10, 36, 10, 28); ctx.fillRect(0, 36, 10, 28);
+    ctx.restore();
+  }
+
+  // --- ŚWIAT ---
+  function drawWorld(){
+    world.signs.forEach(s=> drawSchoolSign(s));
+    world.obstacles.forEach(o=>{
+      if(o.type==='cone'){
+        ctx.fillStyle='#ff9248';
+        ctx.beginPath(); ctx.moveTo(o.x, o.y+o.h); ctx.lineTo(o.x+o.w/2,o.y); ctx.lineTo(o.x+o.w,o.y+o.h); ctx.closePath(); ctx.fill();
+        ctx.fillStyle='#fff'; ctx.fillRect(o.x+4,o.y+o.h-10,o.w-8,6);
+      } else if(o.type==='hole'){
+        ctx.fillStyle='#101010'; ctx.fillRect(o.x,o.y,o.w,o.h);
+      } else if(o.type==='ball'){
+        ctx.fillStyle='#ff4444'; ctx.beginPath(); ctx.arc(o.x+o.w/2,o.y+o.h/2+Math.sin(o.phase/10)*4,o.w/2,0,Math.PI*2); ctx.fill();
+      } else if(o.type==='bike'){
+        ctx.fillStyle='#444'; ctx.fillRect(o.x,o.y,o.w,o.h);
+        ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(o.x+12,o.y+o.h,10,0,Math.PI*2); ctx.arc(o.x+o.w-12,o.y+o.h,10,0,Math.PI*2); ctx.fill();
+      } else if(o.type==='fallen_sign'){
+        ctx.fillStyle='#ffd34d'; ctx.fillRect(o.x,o.y,o.w,o.h);
+        ctx.strokeStyle='#e53935'; ctx.lineWidth=3; ctx.strokeRect(o.x,o.y,o.w,o.h);
+      }
+    });
+    world.items.forEach(it=>{
+      const {x,y,w,h}=it;
+      if(it.type==='vest'){
+        ctx.fillStyle = '#ffd34d'; ctx.beginPath(); ctx.moveTo(x+w/4,y); ctx.lineTo(x+3*w/4,y); ctx.lineTo(x+w,y+h); ctx.lineTo(x,y+h); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#bfc6cc'; ctx.fillRect(x+4,y+h*0.4,w-8,4); ctx.fillRect(x+4,y+h*0.7,w-8,4);
+      } else if(it.type==='heart'){
+        // serce
+        ctx.fillStyle='#e00000';
+        ctx.beginPath();
+        ctx.moveTo(x+w/2, y+h*0.55);
+        ctx.bezierCurveTo(x+w*0.35, y, x, y, x, y+h*0.45);
+        ctx.bezierCurveTo(x, y+h, x+w*0.5, y+h, x+w*0.5, y+h+4);
+        ctx.bezierCurveTo(x+w*0.5, y+h, x+w, y+h, x+w, y+h*0.45);
+        ctx.bezierCurveTo(x+w, y, x+w*0.65, y, x+w/2, y+h*0.55);
+        ctx.fill();
+      }
+    });
+  }
+
+  // --- LOGIKA POZIOMÓW ---
+  function levelUpIfNeeded(){
+    const needed = state.level*200;
+    if(state.score>=needed){
+      state.level++;
+      state.speed += 1.2;
+      state.levelMsg = `Zdobyłeś ${needed} punktów! Level ${state.level}`;
+      state.levelMsgTimer = 120;
+      beep(1000,0.18,'square',0.12);
+    }
+  }
+
+  // --- PĘTLA AKTUALIZACJI ---
+  function update(){
+    if(!state.running||state.paused||state.gameOver||state.showStart) return;
+    const spd = state.speed + Math.min((state.level-1)*0.6, 6);
+    world.offset += spd;
+
+    // grawitacja
+    player.vy += 0.9; player.y += player.vy;
+    const groundLine = GROUND_Y - player.h;
+    if(player.y > groundLine){ player.y = groundLine; player.vy = 0; player.onGround = true; }
+
+    // spawn + ruch świata
+    spawnStuff();
+    world.obstacles.forEach(o=>{ o.x -= spd; if(o.type==='ball') o.phase+=1; });
+    world.items.forEach(it=> it.x -= spd);
+    world.signs.forEach(s=> s.x -= spd*0.6);
+
+    // czyszczenie
+    world.obstacles = world.obstacles.filter(o=> o.x+o.w > -30);
+    world.items = world.items.filter(it=> it.x+it.w > -30);
+    world.signs = world.signs.filter(s=> s.x+s.w > -40);
+
+    player.animStep += 1;
+
+    // kolizje z przeszkodami
+    for(const o of world.obstacles){
+      if(o.type==='hole'){
+        const center = player.x + player.w*0.5;
+        const over = center > o.x && center < o.x+o.w;
+        const feetOnGround = (player.y+player.h) >= (GROUND_Y-2) && player.vy>=0;
+        if(over && feetOnGround){ hitObstacle(o); break; }
+      } else if(rectsCollide(player,o)) { hitObstacle(o); break; }
+    }
+
+    // punkty za ominięcie przeszkód (+10)
+    for(const o of world.obstacles){
+      if(!o.scored && (o.x + o.w) < player.x){
+        o.scored = true;
+        state.score += 10;
+        addFloatText('+10', player.x+player.w/2, player.y, '#0ff');
+      }
+    }
+
+    // zbieranie przedmiotów
+    for(let i=world.items.length-1;i>=0;i--){
+      const it = world.items[i];
+      if(rectsCollide(player,it)){
+        world.items.splice(i,1);
+        if(it.type==='vest'){
+          state.score += 20; beep(880,0.08,'square',0.08);
+          addFloatText('+20', player.x+player.w/2, player.y, '#0f0');
+        } else if(it.type==='heart'){
+          if(state.lives < state.maxLives){
+            state.lives += 1; addFloatText('+1 ❤️', player.x+player.w/2, player.y, '#f00'); beep(740,0.1,'triangle',0.1);
+          } else {
+            // jeśli pełne życia, mały bonus punktów
+            state.score += 10; addFloatText('+10', player.x+player.w/2, player.y, '#f0a'); beep(640,0.08,'sine',0.08);
+          }
+        }
+      }
+    }
+
+    // poziomy + komunikat
+    levelUpIfNeeded();
+    if(state.levelMsgTimer>0) state.levelMsgTimer--;
+
+    // pływające napisy
+    floatTexts.forEach(f=>{f.y-=0.5; f.timer--;});
+    floatTexts = floatTexts.filter(f=>f.timer>0);
+  }
+
+  function hitObstacle(o){
+    beep(220,0.15,'sawtooth',0.12);
+    state.lives -= 1;
+    addFloatText('-1 ❤️', player.x+player.w/2, player.y-10, '#f00');
+    player.vy = -12; player.onGround=false;
+    const idx = world.obstacles.indexOf(o); if(idx>-1) world.obstacles.splice(idx,1);
+    if(state.lives<=0) endGame();
+  }
+
+  // --- RYSOWANIE HUD ---
+  function drawHUD(){
+    ctx.fillStyle='#0b1020'; ctx.globalAlpha=0.18; ctx.fillRect(12,12, 340, 120); ctx.fillRect(W-340-12,12, 340, 120); ctx.globalAlpha=1;
+    ctx.fillStyle='#0b1020'; ctx.font='20px system-ui,Segoe UI,Roboto,Arial'; ctx.textAlign='left';
+    ctx.fillText('Wynik: '+state.score, 24, 38);
+    const hearts='❤️'.repeat(Math.min(state.maxLives,Math.max(0,state.lives)));
+    ctx.fillText('Życia: '+ hearts + (state.lives>state.maxLives?` (+${state.lives-state.maxLives})`:''), 24, 66);
+    ctx.fillText('Poziom: '+state.level, 24, 94);
+    ctx.textAlign='right';
+    ctx.fillText('Rekord: '+state.best, W-24, 38);
+    ctx.fillText('bezpieczna szkola chomranice', W-24, 66);
+
+    if(state.levelMsgTimer>0){
+      ctx.fillStyle='rgba(0,0,0,0.55)';
+      ctx.fillRect(W/2-260, 100, 520, 56);
+      ctx.fillStyle='#ffd34d'; ctx.font='bold 26px system-ui,Segoe UI,Roboto,Arial'; ctx.textAlign='center';
+      ctx.fillText(state.levelMsg, W/2, 138);
+      ctx.textAlign='left';
+    }
+
+    // pływające napisy (+10, +20, -1 ❤️, +1 ❤️)
+    floatTexts.forEach(f=>{
+      ctx.fillStyle=f.color; ctx.font='bold 18px Arial'; ctx.textAlign='center'; ctx.fillText(f.txt, f.x, f.y);
+    });
+  }
+
+  function drawGameOver(){
+    ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#ffd34d'; ctx.font='bold 56px system-ui,Segoe UI,Roboto,Arial'; ctx.textAlign='center';
+    ctx.fillText('Koniec gry!', W/2, H/2 - 20);
+    ctx.fillStyle='#0b1020'; ctx.font='24px system-ui,Segoe UI,Roboto,Arial';
+    ctx.fillText('Wynik: '+state.score+'  •  Rekord: '+state.best, W/2, H/2 + 18);
+    ctx.fillText('Naciśnij Enter lub Start, aby zagrać ponownie', W/2, H/2 + 50);
+  }
+
+  // --- EKRAN STARTOWY ---
+  function drawStartScreen(){
+    // tło jak w grze
+    ctx.fillStyle='#87c9ff'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#7ec850'; ctx.fillRect(0,H-120,W,120);
+    // tytuł
+    ctx.fillStyle='#0b1020'; ctx.font='bold 52px system-ui,Segoe UI,Roboto,Arial'; ctx.textAlign='center';
+    ctx.fillText('Bezpieczna szkoła Chomranice', W/2, 120);
+    // duża postać
+    drawBigPoliceman(W/2, H/2, 1.5);
+    // instrukcja
+    ctx.font='24px system-ui,Segoe UI,Roboto,Arial';
+    ctx.fillText('Sterowanie: ← → ruch, ↑ / Spacja skok, P pauza, F pełny ekran', W/2, H-80);
+    ctx.fillText('Naciśnij Enter lub Start aby rozpocząć', W/2, H-40);
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    if(state.showStart){
+      drawStartScreen();
+      return;
+    }
+    drawBackground();
+    drawWorld();
+    drawPlayer();
+    drawHUD();
+    if(state.gameOver) drawGameOver();
+  }
+
+  function loop(){ update(); draw(); requestAnimationFrame(loop); }
+
+  function resetGame(){
+    state.running=false; state.score=0; state.lives=3; state.gameOver=false; state.speed=5; state.level=1; state.levelMsg=''; state.levelMsgTimer=0;
+    world.offset=0; world.obstacles.length=0; world.items.length=0; world.signs.length=0; spawnTimer=0;
+    heartTimer=0; heartInterval=randInt(900,1200);
+    player.x=140; player.y=GROUND_Y - player.h; player.vy=0; player.onGround=true; player.animStep=0;
+    floatTexts=[];
+  }
+  function endGame(){
+    state.gameOver=true; state.running=false; if(state.score>state.best){ state.best=state.score; localStorage.setItem('bsc_best',String(state.best)); }
+  }
+
+  // --- Skok i klawisze ---
+  const keys={left:false,right:false};
+  function jump(){ if(player.onGround){ player.vy=-16; player.onGround=false; beep(660,0.08,'triangle',0.08);} }
+
+  //  HANDLERY DLA PRZYCISKÓW MOBILNYCH NA window
+  window.pressLeft = function(){ keys.left=true; setTimeout(()=>keys.left=false,150); };
+  window.pressRight = function(){ keys.right=true; setTimeout(()=>keys.right=false,150); };
+  window.pressJump = function(){ jump(); audioCtx.resume(); };
+  window.pressStartPause = function(){
+    if(state.showStart){ state.showStart=false; resetGame(); state.running=true; audioCtx.resume(); return; }
+    if(state.gameOver){ resetGame(); state.running=true; audioCtx.resume(); return; }
+    state.paused = !state.paused;
+  };
+
+  // --- Klawiatura ---
+  window.addEventListener('keydown',e=>{
+    if(e.code==='ArrowLeft') keys.left=true;
+    if(e.code==='ArrowRight') keys.right=true;
+    if(e.code==='ArrowUp'||e.code==='Space') { jump(); audioCtx.resume(); }
+    if(e.code==='KeyP'&&state.running) state.paused=!state.paused;
+    if(e.code==='Enter'){
+      if(state.showStart){ state.showStart=false; resetGame(); state.running=true; audioCtx.resume(); return; }
+      if(state.gameOver){ resetGame(); }
+      state.running=true; audioCtx.resume();
+    }
+    if(e.code==='KeyF') toggleFullscreen();
+  });
+  window.addEventListener('keyup',e=>{ if(e.code==='ArrowLeft') keys.left=false; if(e.code==='ArrowRight') keys.right=false; });
+
+  function applyHorizontal(){ if(keys.left) player.x-=6; if(keys.right) player.x+=6; player.x=Math.max(20, Math.min(W-player.w-20, player.x)); }
+  const _update=update; update=function(){ _update(); if(state.running&&!state.paused&&!state.gameOver&&!state.showStart) applyHorizontal(); };
+
+  // --- Kontrolki UI ---
+  document.getElementById('btnStart').onclick=()=>{
+    if(state.showStart){ state.showStart=false; resetGame(); }
+    if(state.gameOver){ resetGame(); }
+    state.running=true; audioCtx.resume();
+  };
+  document.getElementById('btnPause').onclick=()=>{ if(state.running) state.paused=!state.paused };
+  document.getElementById('btnReset').onclick=()=> resetGame();
+  document.getElementById('btnSound').onclick=()=>{
+    soundOn=!soundOn;
+    document.getElementById('btnSound').textContent = soundOn? '🔊 Dźwięk: włączony' : '🔇 Dźwięk: wyłączony';
+  };
+  document.getElementById('btnFS').onclick=()=> toggleFullscreen();
+
+  function toggleFullscreen(){
+    if(!document.fullscreenElement){ canvas.requestFullscreen?.(); }
+    else { document.exitFullscreen?.(); }
+  }
+
+  // --- TAP = SKOK (mobile) ---
+  function shouldIgnoreTap(target){
+    return target.closest && (target.closest('#mobileControls') || target.closest('.btns')) || target.tagName === 'BUTTON';
+  }
+  function handleTap(e){
+    if(shouldIgnoreTap(e.target)) return;
+    // iOS wymaga interakcji do audio
+    audioCtx.resume();
+    // Start / restart jednym tapnięciem, potem skok
+    if(state.showStart){ state.showStart=false; resetGame(); state.running=true; return; }
+    if(state.gameOver){ resetGame(); state.running=true; return; }
+    if(state.paused){ state.paused=false; }
+    jump();
+    //  ghost-click / scroll
+    if(e.cancelable) e.preventDefault();
+  }
+
+  //  Pointer Events gdy dostępne, fallback do touchstart, plus click
+  if(window.PointerEvent){
+    canvas.addEventListener('pointerdown', handleTap, {passive:false});
+    document.body.addEventListener('pointerdown', handleTap, {passive:false});
+  } else {
+    canvas.addEventListener('touchstart', handleTap, {passive:false});
+    document.body.addEventListener('touchstart', handleTap, {passive:false});
+  }
+  // Click jako rezerwa 
+  document.addEventListener('click', handleTap, {passive:false});
+
+  loop();
+})();
+</script>
+</body>
+</html>
